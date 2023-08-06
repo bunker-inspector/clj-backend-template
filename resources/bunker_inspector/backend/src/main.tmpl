@@ -1,0 +1,56 @@
+(ns {{top/ns}}.main
+  (:require
+   [integrant.core :as ig]
+   [ring.adapter.jetty :as jetty]
+   [compojure.core :as compojure]
+   [compojure.route :as route]
+   [ring.util.response :refer [response status]]
+   [ring.middleware.session :refer [wrap-session]]
+   [ring.middleware.session.cookie :as cookie]
+   [ring.middleware.params :refer [wrap-params]]
+   [ring.middleware.json :refer [wrap-json-body wrap-json-response]]
+   [ring.middleware.cors :refer [wrap-cors]]
+   [clojure.tools.logging :as log])
+  (:import java.util.Base64))
+
+(defn base64-decode [blob]
+  (-> (Base64/getDecoder) (.decode blob) String.))
+
+(def ^:private not-found
+  (route/not-found {:status 404
+                    :body "Not found!"
+                    :headers {"Content-Type" "text/plain"}}))
+
+(defmethod ig/init-key :web/routes [_ routes]
+  (apply compojure/routes (conj routes not-found)))
+
+(defmethod ig/prep-key :web.security/session-key [_ session-key-str]
+  (.getBytes session-key-str))
+
+(defn- wrap-error-fallback [handler]
+  (fn [request]
+    (try (handler request)
+         (catch Exception e
+           (log/error e)
+           (-> (response "Something went wrong.")
+               (status 500))))))
+
+(defmethod ig/init-key :web/app [_ {:keys [routes session-key]
+                                    {:keys [access-control-allow-methods
+                                            access-control-allow-origin]} :cors}]
+  (-> routes
+      wrap-params
+      wrap-json-body
+      wrap-json-response
+      (wrap-cors :access-control-allow-methods access-control-allow-methods
+                 :access-control-allow-origin access-control-allow-origin
+                 :access-control-allow-credentials ["true"])
+      (wrap-session {:cookie-name "forktime-session"
+                     :store (cookie/cookie-store {:key session-key})})
+      wrap-error-fallback))
+
+(defmethod ig/init-key :web/server [_ {:keys [app opts]}]
+  (jetty/run-jetty app opts))
+
+(defmethod ig/halt-key! :web/server [_ server]
+  (.stop server))
